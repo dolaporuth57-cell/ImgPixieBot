@@ -1,3 +1,4 @@
+
 import os
 import io
 import logging
@@ -6,9 +7,12 @@ from typing import Dict, Tuple, Optional
 
 from PIL import Image
 from aiogram import Bot, Dispatcher, types
-from aiogram.contrib.middleware.logging import LoggingMiddleware
-from aiogram.types import ParseMode, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.utils import executor
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
+from aiogram.types.input_file import BufferedInputFile
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -26,9 +30,11 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN environment variable is required!")
 
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(bot)
-dp.middleware.setup(LoggingMiddleware())
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN)
+)
+dp = Dispatcher()
 
 # Supported formats
 SUPPORTED_FORMATS: Dict[str, Tuple[str, str]] = {
@@ -49,22 +55,18 @@ user_states: Dict[int, Dict] = {}
 
 def get_format_buttons() -> InlineKeyboardMarkup:
     """Generate inline keyboard with supported formats"""
-    buttons = []
-    row = []
+    builder = InlineKeyboardBuilder()
     
-    for idx, fmt in enumerate(SUPPORTED_FORMATS.keys()):
-        row.append(InlineKeyboardButton(fmt.upper(), callback_data=f"format_{fmt}"))
-        if len(row) == 4:  # 4 buttons per row
-            buttons.append(row)
-            row = []
-    
-    if row:
-        buttons.append(row)
+    for fmt in SUPPORTED_FORMATS.keys():
+        builder.button(text=fmt.upper(), callback_data=f"format_{fmt}")
     
     # Add cancel button
-    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
+    builder.button(text="❌ Cancel", callback_data="cancel")
     
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+    # Arrange buttons: 4 per row
+    builder.adjust(4, 4, 4, 4, 1)
+    
+    return builder.as_markup()
 
 async def convert_image(
     image_bytes: bytes,
@@ -92,7 +94,7 @@ async def convert_image(
         if output_format.lower() in ['jpg', 'jpeg'] and image.mode == 'RGBA':
             # Create white background
             background = Image.new('RGB', image.size, (255, 255, 255))
-            background.paste(image, mask=image.split()[3])  # Use alpha channel as mask
+            background.paste(image, mask=image.split()[3])
             image = background
         elif output_format.lower() in ['jpg', 'jpeg'] and image.mode not in ['RGB', 'L']:
             image = image.convert('RGB')
@@ -100,8 +102,8 @@ async def convert_image(
         # Handle GIF animation
         if input_format.lower() == 'gif' and output_format.lower() != 'gif':
             # Extract first frame of GIF
-            if hasattr(image, 'is_animated') and image.is_animated:
-                image.seek(0)  # Get first frame
+            if getattr(image, 'is_animated', False):
+                image.seek(0)
                 image = image.convert('RGB')
         
         # Save to bytes
@@ -121,13 +123,10 @@ async def convert_image(
         # Handle GIF output
         if output_format.lower() == 'gif':
             if input_format.lower() == 'gif':
-                # Keep as GIF
                 image.save(output_buffer, format='GIF', save_all=True)
             else:
-                # Convert single image to GIF
                 image.save(output_buffer, format='GIF')
         else:
-            # Standard save
             image.save(output_buffer, format=SUPPORTED_FORMATS[output_format.lower()][0], **save_kwargs)
         
         output_buffer.seek(0)
@@ -143,8 +142,8 @@ def get_file_extension(filename: str) -> str:
 
 # ==================== Bot Handlers ====================
 
-@dp.message_handler(commands=['start'])
-async def start_command(message: types.Message):
+@dp.message(Command("start"))
+async def start_command(message: Message):
     """Handle /start command"""
     welcome_text = (
         "🎨 *Welcome to ImgPixieBot!*\n\n"
@@ -157,14 +156,10 @@ async def start_command(message: types.Message):
         "⚡ *Pro tip:* For best results, use high-quality images."
     )
     
-    await message.reply(
-        welcome_text,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=types.ReplyKeyboardRemove()
-    )
+    await message.reply(welcome_text)
 
-@dp.message_handler(commands=['help'])
-async def help_command(message: types.Message):
+@dp.message(Command("help"))
+async def help_command(message: Message):
     """Handle /help command"""
     help_text = (
         "📖 *Help & Commands*\n\n"
@@ -182,10 +177,10 @@ async def help_command(message: types.Message):
         "- For JPEG output, transparent backgrounds become white"
     )
     
-    await message.reply(help_text, parse_mode=ParseMode.MARKDOWN)
+    await message.reply(help_text)
 
-@dp.message_handler(commands=['formats'])
-async def formats_command(message: types.Message):
+@dp.message(Command("formats"))
+async def formats_command(message: Message):
     """Handle /formats command"""
     formats_text = "📋 *Supported Formats:*\n\n"
     for fmt in SUPPORTED_FORMATS.keys():
@@ -193,10 +188,10 @@ async def formats_command(message: types.Message):
     
     formats_text += "\n🔄 Send an image to get started!"
     
-    await message.reply(formats_text, parse_mode=ParseMode.MARKDOWN)
+    await message.reply(formats_text)
 
-@dp.message_handler(commands=['cancel'])
-async def cancel_command(message: types.Message):
+@dp.message(Command("cancel"))
+async def cancel_command(message: Message):
     """Handle /cancel command"""
     user_id = message.from_user.id
     if user_id in user_states:
@@ -205,8 +200,8 @@ async def cancel_command(message: types.Message):
     else:
         await message.reply("ℹ️ No active operation to cancel.")
 
-@dp.message_handler(content_types=['photo'])
-async def handle_photo(message: types.Message):
+@dp.message(lambda message: message.photo)
+async def handle_photo(message: Message):
     """Handle photo messages (non-file format)"""
     user_id = message.from_user.id
     
@@ -218,7 +213,7 @@ async def handle_photo(message: types.Message):
     # Store in user state
     user_states[user_id] = {
         'image_bytes': file_bytes.getvalue(),
-        'input_format': 'jpg'  # Telegram photos are always JPEG
+        'input_format': 'jpg'
     }
     
     # Show format selection
@@ -227,8 +222,8 @@ async def handle_photo(message: types.Message):
         reply_markup=get_format_buttons()
     )
 
-@dp.message_handler(content_types=['document'])
-async def handle_document(message: types.Message):
+@dp.message(lambda message: message.document)
+async def handle_document(message: Message):
     """Handle document messages (image files)"""
     user_id = message.from_user.id
     document = message.document
@@ -271,15 +266,15 @@ async def handle_document(message: types.Message):
         logger.error(f"Error handling document: {e}")
         await message.reply("❌ Failed to process your image. Please try again.")
 
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith('format_'))
-async def process_format_selection(callback_query: types.CallbackQuery):
+@dp.callback_query(lambda c: c.data and c.data.startswith('format_'))
+async def process_format_selection(callback_query: CallbackQuery):
     """Handle format selection callback"""
     user_id = callback_query.from_user.id
     output_format = callback_query.data.replace('format_', '')
     
     # Check if user has uploaded an image
     if user_id not in user_states:
-        await callback_query.answer("❌ Please send an image first!")
+        await callback_query.answer("❌ Please send an image first!", show_alert=True)
         await callback_query.message.edit_text(
             "ℹ️ No image found. Please send me an image first, then select a format."
         )
@@ -325,13 +320,12 @@ async def process_format_selection(callback_query: types.CallbackQuery):
         base_name = Path(original_filename).stem
         output_filename = f"{base_name}.{output_format}"
         
-        # Send converted image
+        # Send converted image using BufferedInputFile
+        input_file = BufferedInputFile(converted_bytes, filename=output_filename)
+        
         await bot.send_document(
             chat_id=user_id,
-            document=types.InputFile(
-                io.BytesIO(converted_bytes),
-                filename=output_filename
-            ),
+            document=input_file,
             caption=f"✅ Converted *{input_format.upper()}* → *{output_format.upper()}*\n"
                     f"📦 Size: {len(converted_bytes) / 1024:.1f}KB",
             parse_mode=ParseMode.MARKDOWN
@@ -352,8 +346,8 @@ async def process_format_selection(callback_query: types.CallbackQuery):
             "❌ An error occurred during conversion. Please try again."
         )
 
-@dp.callback_query_handler(lambda c: c.data == 'cancel')
-async def cancel_callback(callback_query: types.CallbackQuery):
+@dp.callback_query(lambda c: c.data == 'cancel')
+async def cancel_callback(callback_query: CallbackQuery):
     """Handle cancel callback"""
     user_id = callback_query.from_user.id
     
@@ -364,8 +358,8 @@ async def cancel_callback(callback_query: types.CallbackQuery):
     else:
         await callback_query.answer("ℹ️ No active operation.")
 
-@dp.message_handler()
-async def handle_unknown(message: types.Message):
+@dp.message()
+async def handle_unknown(message: Message):
     """Handle unknown messages"""
     await message.reply(
         "🤔 I only work with images!\n\n"
@@ -375,15 +369,17 @@ async def handle_unknown(message: types.Message):
 
 # ==================== Main Execution ====================
 
-if __name__ == '__main__':
+async def main():
+    """Main function to start the bot"""
     logger.info("Starting ImgPixieBot...")
-    
-    # Set webhook for Railway (if using webhook mode)
-    # For Railway, you'd typically use webhook instead of polling
-    # This example uses polling for simplicity
-    
+    await dp.start_polling(bot)
+
+if __name__ == '__main__':
+    import asyncio
     try:
-        executor.start_polling(dp, skip_updates=True)
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
     except Exception as e:
         logger.error(f"Bot crashed: {e}")
         raise
